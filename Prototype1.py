@@ -6,12 +6,12 @@ from calculate_rmse import calculate_rmse  # Import RMSE function
 
 # Select route and ground truth
 print("Select a route file:")
-print("1. route1.csv\n2. route2.csv\n3. route3.csv")
+print("1. route1.csv\n2. route2.csv\n3. route3.csv\n4. route4.csv")
 route_choice = int(input("Enter the number of the route file: "))
 filename = f"route{route_choice}.csv"
 
 print("Select a ground truth file:")
-print("1. ground_truth1.csv\n2. ground_truth2.csv\n3. ground_truth3.csv")
+print("1. ground_truth1.csv\n2. ground_truth2.csv\n3. ground_truth3.csv\n4. ground_truth4.csv")
 ground_truth_choice = int(input("Enter the number of the ground truth file: "))
 ground_truth_file = f"ground_truth{ground_truth_choice}.csv"
 
@@ -98,4 +98,3 @@ pd.DataFrame(aligned_trajectory, columns=['x', 'y']).to_csv("estimated_trajector
 pd.DataFrame(aligned_truth, columns=['x', 'y']).to_csv("ground_truth.csv", index=False)
 rmse = calculate_rmse("estimated_trajectory.csv", "ground_truth.csv")
 print(f"\nRoot Mean Square Error (RMSE): {rmse:.3f} meters")
-

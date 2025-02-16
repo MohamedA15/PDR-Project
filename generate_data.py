@@ -136,8 +136,9 @@ def print_drift_intervals(drift):
         print(f"Interval {i + 1}: {value:.2f} meters")
 
 # Main script execution
+# Main script execution
 def main():
-    routes = ["route1", "route2", "route3"]
+    routes = ["route1", "route2", "route3", "route4"]
     while True:
         selected_route, ground_truth_file = select_route(routes)
 
