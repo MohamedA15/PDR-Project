@@ -92,9 +92,3 @@ plt.show()
 print("\nDrift at each interval (meters):")
 for i, d in enumerate(drift):
     print(f"Step {i+1}: Drift = {d:.3f} meters")
-
-# Save Data & Compute RMSE
-pd.DataFrame(aligned_trajectory, columns=['x', 'y']).to_csv("estimated_trajectory.csv", index=False)
-pd.DataFrame(aligned_truth, columns=['x', 'y']).to_csv("ground_truth.csv", index=False)
-rmse = calculate_rmse("estimated_trajectory.csv", "ground_truth.csv")
-print(f"\nRoot Mean Square Error (RMSE): {rmse:.3f} meters")
