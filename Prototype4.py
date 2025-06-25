@@ -1,20 +1,15 @@
-import os
 import numpy as np
 import scipy.signal as signal
 import matplotlib.pyplot as plt
 import pandas as pd
 from ahrs.filters import Madgwick
+import pywt
+from scipy.stats import median_abs_deviation as mad
+from scipy.interpolate import interp1d
 
-# Display available routes and ground truth files
-route_options = [
-    "route1.csv", "route2.csv", "route3.csv", "route4.csv",
-    "route4.1.csv", "route5.csv", "route5.1.csv",
-    "route6.csv", "route6.1.csv"
-]
-ground_truth_options = [
-    "ground_truth1.csv", "ground_truth2.csv", "ground_truth3.csv",
-    "ground_truth4.csv", "ground_truth5.csv", "ground_truth6.csv"
-]
+#  File selection
+route_options = [f"route{i}.csv" for i in range(1,10)] + [f"route{i}.1.csv" for i in range(4,7)]
+ground_truth_options = [f"ground_truth{i}.csv" for i in range(1,10)]
 
 print("Available routes:")
 for i, route in enumerate(route_options, start=1):
@@ -24,224 +19,305 @@ print("\nAvailable ground truth files:")
 for i, truth in enumerate(ground_truth_options, start=1):
     print(f"{i}. {truth}")
 
-# Prompt the user to select a route and ground truth file
-route_choice = int(input("Select a route (1-9): ")) - 1
-truth_choice = int(input("Select a ground truth file (1-6): ")) - 1
-
-if route_choice not in range(len(route_options)) or truth_choice not in range(len(ground_truth_options)):
-    raise ValueError("Invalid choice. Please choose a valid option.")
+route_choice = int(input("Select a route (1-10): ")) - 1
+truth_choice = int(input("Select a ground truth file (1-7): ")) - 1
 
 selected_route = route_options[route_choice]
 selected_ground_truth = ground_truth_options[truth_choice]
 
-# Check if files exist
-if not os.path.exists(selected_route):
-    raise FileNotFoundError(f"IMU data file '{selected_route}' not found.")
-if not os.path.exists(selected_ground_truth):
-    raise FileNotFoundError(f"Ground truth file '{selected_ground_truth}' not found.")
 
-# Load IMU data from the selected route file
+# Load and clean data
+
 df = pd.read_csv(selected_route)
-
-# Clean column names to remove leading/trailing spaces
 df.columns = df.columns.str.strip()
+ground_truth = pd.read_csv(selected_ground_truth).values
 
-# Verify required columns exist
-required_columns = ['time', 'ax', 'ay', 'az', 'wx', 'wy', 'wz']
-for col in required_columns:
-    if col not in df.columns or df[col].isnull().all():
-        raise ValueError(f"Error: Missing or empty column '{col}' in the dataset.")
-
-# Drop rows with missing values in critical columns
-df = df.dropna(subset=required_columns)
-
-# Ensure 'time' column is numeric
-if not np.issubdtype(df['time'].dtype, np.number):
-    raise ValueError("Error: 'time' column is not numeric.")
-
-# Load ground truth data
-ground_truth_df = pd.read_csv(selected_ground_truth)
-true_positions = ground_truth_df.values  # Ground truth positions (X, Y)
-
-# Extract columns from IMU data
+required_cols = ['time', 'ax', 'ay', 'az', 'wx', 'wy', 'wz', 'Bx', 'By', 'Bz']
+df = df.dropna(subset=required_cols)
 timestamps = df['time'].values
-ax, ay, az = df['ax'].values, df['ay'].values, df['az'].values
-wx, wy, wz = df['wx'].values, df['wy'].values, df['wz'].values
+accel = df[['ax','ay','az']].values
+gyro  = df[['wx','wy','wz']].values
+mag   = df[['Bx','By','Bz']].values
 
-# Filtering functions
-def low_pass_filter(data, cutoff, fs, order=6):
-    nyquist = 0.5 * fs
-    normal_cutoff = cutoff / nyquist
-    b, a = signal.butter(order, normal_cutoff, btype='low', analog=False)
-    return signal.filtfilt(b, a, data)
+def wavelet_denoise(data, wavelet='db6', level=2):
+    # If the data length is odd, pad it so wavelet transform can be applied properly
+    if len(data) % 2 != 0:
+        data = np.pad(data, (0,1), mode='edge')[:len(data)]
 
-def high_pass_filter(data, cutoff, fs, order=6):
-    nyquist = 0.5 * fs
-    normal_cutoff = cutoff / nyquist
-    b, a = signal.butter(order, normal_cutoff, btype='high', analog=False)
-    return signal.filtfilt(b, a, data)
+    # Break the signal down into wavelet coefficients
+    coeffs = pywt.wavedec(data, wavelet, mode='per', level=level)
 
-# Apply noise filtering to accelerometer and gyroscope data
-sampling_rate = 50  # 50 Hz sampling rate
-accel_cutoff = 5  # Low-pass cutoff frequency in Hz
-gyro_cutoff = 1  # High-pass cutoff frequency in Hz
-filter_order = 6  # Filter order
+    # Estimate noise level using Median Absolute Deviation on the detail coefficients
+    sigma = mad(coeffs[-level])
 
-ax_filtered = low_pass_filter(ax, accel_cutoff, sampling_rate, order=filter_order)
-ay_filtered = low_pass_filter(ay, accel_cutoff, sampling_rate, order=filter_order)
-az_filtered = low_pass_filter(az, accel_cutoff, sampling_rate, order=filter_order)
+    # Compute a threshold based on the estimated noise
+    thresh = sigma * np.sqrt(2*np.log(len(data)))
 
-wx_filtered = high_pass_filter(wx, gyro_cutoff, sampling_rate, order=filter_order)
-wy_filtered = high_pass_filter(wy, gyro_cutoff, sampling_rate, order=filter_order)
-wz_filtered = high_pass_filter(wz, gyro_cutoff, sampling_rate, order=filter_order)
+    # Apply soft thresholding to all detail coefficients (ignore the first one which is approximation)
+    coeffs[1:] = [pywt.threshold(c, thresh, mode='soft') for c in coeffs[1:]]
 
-# Plot noise filtering results
-plt.figure(figsize=(12, 8))
-plt.subplot(2, 1, 1)
-plt.plot(timestamps, ax, label="Raw ax")
-plt.plot(timestamps, ax_filtered, label="Filtered ax")
-plt.title("Accelerometer Data (X-axis)")
-plt.xlabel("Time (s)")
-plt.ylabel("Acceleration (m/s²)")
-plt.legend()
-plt.grid()
+    # Reconstruct the signal from the thresholded coefficients
+    den = pywt.waverec(coeffs, wavelet, mode='per')
 
-plt.subplot(2, 1, 2)
-plt.plot(timestamps, wx, label="Raw wx")
-plt.plot(timestamps, wx_filtered, label="Filtered wx")
-plt.title("Gyroscope Data (X-axis)")
-plt.xlabel("Time (s)")
-plt.ylabel("Angular Velocity (rad/s)")
-plt.legend()
-plt.grid()
+    # Return the denoised signal (same length as input)
+    return den[:len(data)]
+
+
+# Sensor filtering
+
+def apply_sensor_filtering(accel, gyro, mag, fs=60):
+    af = np.zeros_like(accel)
+    gf = np.zeros_like(gyro)
+    mf = np.zeros_like(mag)
+    for i in range(3):
+        a = wavelet_denoise(accel[:,i])
+        a = signal.medfilt(a, kernel_size=7)
+        af[:,i] = signal.sosfiltfilt(
+            signal.butter(4,6,btype='low',fs=fs,output='sos'), a
+        )
+        g = wavelet_denoise(gyro[:,i])
+        gf[:,i] = signal.sosfiltfilt(
+            signal.butter(4,1.5,btype='high',fs=fs,output='sos'), g
+        )
+        m = wavelet_denoise(mag[:,i])
+        mf[:,i] = signal.sosfiltfilt(
+            signal.butter(4,6,btype='low',fs=fs,output='sos'), m
+        )
+    mf -= np.mean(mf, axis=0)
+    return af, gf, mf
+
+accel_filt, gyro_filt, mag_filt = apply_sensor_filtering(accel, gyro, mag)
+
+
+# Orientation via Madgwick
+madgwick = Madgwick(frequency=30, gain=0.010)
+
+# Preallocate a quaternion array for storing orientation estimates
+quats = np.zeros((len(accel_filt), 4))
+
+# Start with an identity quaternion (no rotation)
+quats[0] = [1, 0, 0, 0]
+
+# Loop through IMU data and update orientation using the Madgwick filter
+
+for i in range(1, len(accel_filt)):
+    quats[i] = madgwick.updateMARG(
+        q=quats[i-1],             
+        gyr=gyro_filt[i],         
+        acc=accel_filt[i],        
+        mag=mag_filt[i]           
+    )
+
+# Convert quaternion orientation into Euler angles (roll, pitch, yaw)
+def quat_to_euler(q):
+    # Roll (rotation around x-axis)
+    roll  = np.arctan2(2 * (q[0]*q[1] + q[2]*q[3]), 1 - 2 * (q[1]**2 + q[2]**2))
+    
+    # Pitch (rotation around y-axis)
+    pitch = np.arcsin(2 * (q[0]*q[2] - q[3]*q[1]))
+    
+    # Yaw (rotation around z-axis, i.e. heading)
+    yaw   = np.arctan2(2 * (q[0]*q[3] + q[1]*q[2]), 1 - 2 * (q[2]**2 + q[3]**2))
+    
+    return roll, pitch, yaw
+
+# Apply quaternion-to-Euler conversion to the entire set of orientation estimates
+euler = np.array([quat_to_euler(q) for q in quats])
+
+
+
+#  Step detection
+
+def improved_step_detection(accel_mag, timestamps, yaw, fs=50):
+    sos = signal.butter(4, [1,3], btype='bandpass', fs=fs, output='sos')
+    f = signal.sosfiltfilt(sos, accel_mag)
+    h = np.percentile(f,75)
+    peaks, props = signal.find_peaks(f, height=h, distance=fs//2)
+    sf = len(peaks)/(len(accel_mag)/fs)
+    base = 0.7
+    L = base*(1+0.1*(sf-1.8))
+    lengths = np.full(len(peaks), L)
+    if 'peak_heights' in props:
+        rh = props['peak_heights']/np.max(props['peak_heights'])
+        lengths *= (0.8+0.4*rh)
+    return peaks, timestamps[peaks], yaw[peaks], lengths
+
+accel_mag = np.linalg.norm(accel_filt - np.mean(accel_filt,axis=0), axis=1)
+steps, step_times, step_yaws, step_lengths = improved_step_detection(
+    accel_mag, timestamps, euler[:,2]
+)
+
+
+#Stationary detection
+
+def detect_stationary(accel, gyro, mag, window=15):
+    a_var = pd.Series(np.linalg.norm(accel,axis=1)).rolling(window,center=True).var().fillna(0)
+    g_var = pd.Series(np.linalg.norm(gyro,axis=1)).rolling(window,center=True).var().fillna(0)
+    m_var = pd.Series(np.linalg.norm(mag,axis=1)).rolling(window,center=True).var().fillna(0)
+    return (a_var<0.05)&(g_var<0.01)&(m_var<5)
+
+stationary = detect_stationary(accel_filt, gyro_filt, mag_filt)
+
+#  Trajectory estimation
+
+def estimate_trajectory(steps, yaws, times, lengths, stationary):
+    pos = np.zeros((len(steps)+1,2))
+    vel = np.zeros(2)
+    bias = 0.0
+    for i in range(1,len(steps)):
+        dt = times[i]-times[i-1]
+        L  = lengths[i-1]
+        if stationary[steps[i]]:
+            vel *= 0.2
+            if 1 <= i < len(steps)-1:
+                mag_h = np.arctan2(mag_filt[steps[i],1], mag_filt[steps[i],0])
+                bias = 0.1*(mag_h - yaws[i])
+        else:
+            yc = yaws[i] + bias
+            d  = np.array([np.cos(yc), np.sin(yc)])
+            vel = d*(L/max(0.1, dt))
+        pos[i] = pos[i-1] + vel*dt
+    return pos[:len(steps)]
+
+trajectory = estimate_trajectory(steps, step_yaws, step_times, step_lengths, stationary)
+
+
+#Drift calculation
+
+def calculate_drift(est, gt):
+    n = len(est)
+    idx = np.linspace(0, len(gt)-1, n)
+    fx = interp1d(np.arange(len(gt)), gt[:,0], fill_value="extrapolate")
+    fy = interp1d(np.arange(len(gt)), gt[:,1], fill_value="extrapolate")
+    gt_i = np.vstack((fx(idx), fy(idx))).T
+    drift = np.linalg.norm(est - gt_i, axis=1)
+    return drift, gt_i
+
+drift_vals, gt_interp = calculate_drift(trajectory, ground_truth)
+
+# 10. Performance metrics
+def evaluate_noise(raw, filt):
+    rv = np.var(raw)
+    fv = np.var(filt)
+    rd = 100*(rv-fv)/rv if rv!=0 else 0
+    return rv, fv, rd
+
+def heading_metrics(h):
+    ch = np.abs(np.diff(h))
+    return np.mean(ch), np.std(ch)
+
+def step_metrics(steps, times):
+    if len(steps)<2: return 0,0,0
+    itv = np.diff(times[steps])
+    freq = len(steps)/(times[-1]-times[0]) if times[-1]!=times[0] else 0
+    return freq, np.mean(itv), np.std(itv)
+
+def trajectory_metrics(est, gt):
+    e = np.linalg.norm(est-gt,axis=1)
+    return {
+        'RMSE': np.sqrt(np.mean(e**2)),
+        'MAE': np.mean(e),
+        'MaxError': np.max(e),
+        'FinalError': e[-1],
+        'AvgError': np.mean(e),
+        'MedianError': np.median(e)
+    }
+
+traj_m = trajectory_metrics(trajectory, gt_interp)
+step_f, mean_int, std_int = step_metrics(steps, timestamps)
+head_m, head_s = heading_metrics(euler[:,2])
+noise_m = [evaluate_noise(accel[:,i], accel_filt[:,i]) for i in range(3)] + \
+          [evaluate_noise(gyro[:,i], gyro_filt[:,i]) for i in range(3)]
+duration = timestamps[-1] - timestamps[0]
+zupt_eff = (np.mean(accel_mag[stationary]), np.mean(accel_mag[~stationary]))
+
+# Compute drift at fixed intervals and changes
+num_intervals = 6
+interval_length = len(drift_vals) // num_intervals
+interval_drifts = [
+    drift_vals[(i+1)*interval_length - 1]
+    for i in range(num_intervals)
+]
+drift_changes = [
+    interval_drifts[i] - interval_drifts[i-1]
+    for i in range(1, num_intervals)
+]
+
+
+# Plotting
+
+plt.figure(figsize=(10,5))
+plt.plot(ground_truth[:,0], ground_truth[:,1], 'g-', label='Ground Truth')
+plt.plot(trajectory[:,0], trajectory[:,1], 'r--', label='Estimated')
+plt.xlabel('X (m)'); plt.ylabel('Y (m)')
+plt.title('Estimated vs Ground Truth Trajectory')
+plt.legend(); plt.grid(True); plt.axis('equal')
+
+# Sensor data panels
+plt.figure(figsize=(12,10))
+plt.subplot(3,1,1)
+plt.plot(timestamps, accel_filt)
+plt.title('Filtered Accelerometer'); plt.ylabel('m/s²')
+plt.legend(['X','Y','Z'])
+plt.subplot(3,1,2)
+plt.plot(timestamps, gyro_filt)
+plt.title('Filtered Gyroscope'); plt.ylabel('rad/s')
+plt.legend(['X','Y','Z'])
+plt.subplot(3,1,3)
+plt.plot(timestamps, mag_filt)
+plt.title('Filtered Magnetometer'); plt.ylabel('μT'); plt.xlabel('Time (s)')
+plt.legend(['X','Y','Z'])
 plt.tight_layout()
 plt.show()
 
-# Initialize Madgwick filter with a higher gain to make it less accurate
-madgwick_gain = 0.5  # Increased gain parameter (tunable)
-madgwick = Madgwick(gain=madgwick_gain, frequency=sampling_rate)
-
-# Orientation data storage
-quaternions = np.zeros((len(ax_filtered), 4))
-quaternions[0] = [1, 0, 0, 0]  # Initialize the quaternion (w, x, y, z)
-rolls, pitches, yaws = [], [], []
-
-# Process IMU data using Madgwick filter
-for i in range(1, len(ax_filtered)):
-    quaternions[i] = madgwick.updateIMU(q=quaternions[i-1], 
-                                        gyr=[wx_filtered[i], wy_filtered[i], wz_filtered[i]], 
-                                        acc=[ax_filtered[i], ay_filtered[i], az_filtered[i]])
-    roll = np.arctan2(2*(quaternions[i][0]*quaternions[i][1] + quaternions[i][2]*quaternions[i][3]),
-                      1 - 2*(quaternions[i][1]**2 + quaternions[i][2]**2))
-    pitch = np.arcsin(2*(quaternions[i][0]*quaternions[i][2] - quaternions[i][3]*quaternions[i][1]))
-    yaw = np.arctan2(2*(quaternions[i][0]*quaternions[i][3] + quaternions[i][1]*quaternions[i][2]),
-                     1 - 2*(quaternions[i][2]**2 + quaternions[i][3]**2))
-    
-    # Add some random noise to the orientation estimates
-    roll += np.random.normal(0, 0.1)
-    pitch += np.random.normal(0, 0.1)
-    yaw += np.random.normal(0, 0.1)
-    
-    rolls.append(roll)
-    pitches.append(pitch)
-    yaws.append(yaw)
-
-# Dynamic threshold for stationary detection with reduced sensitivity
-def compute_dynamic_threshold(accel_magnitude, window_size=50, scaling_factor=1.5, growth_rate=0.0005):
-    rolling_mean = pd.Series(accel_magnitude).rolling(window=window_size, min_periods=1).mean()
-    rolling_std = pd.Series(accel_magnitude).rolling(window=window_size, min_periods=1).std()
-    initial_threshold = rolling_mean + scaling_factor * rolling_std
-
-    cumulative_threshold = np.zeros_like(initial_threshold)
-    cumulative_threshold[0] = initial_threshold[0]
-
-    for i in range(1, len(initial_threshold)):
-        if accel_magnitude[i] < cumulative_threshold[i - 1]:
-            cumulative_threshold[i] = cumulative_threshold[i - 1] + growth_rate
-        else:
-            cumulative_threshold[i] = initial_threshold[i]
-
-    return cumulative_threshold
-
-# Compute magnitude and dynamic threshold for stationary detection
-accel_magnitude = np.linalg.norm([ax_filtered, ay_filtered, az_filtered], axis=0)
-dynamic_threshold = compute_dynamic_threshold(accel_magnitude, growth_rate=0.0005)
-
-# Detect stationary periods based on the growing dynamic threshold
-stationary_periods_dynamic = accel_magnitude < dynamic_threshold
-
-# Plot step detection and ZUPT results
-plt.figure(figsize=(12, 6))
-plt.plot(timestamps, accel_magnitude, label="Accelerometer Magnitude")
-plt.plot(timestamps, dynamic_threshold, label="Dynamic Threshold", linestyle="--")
-plt.fill_between(timestamps, 0, 1, where=stationary_periods_dynamic, color='red', alpha=0.3, label="Stationary Periods")
-plt.title("Step Detection and ZUPT")
-plt.xlabel("Time (s)")
-plt.ylabel("Acceleration Magnitude (m/s²)")
-plt.legend()
-plt.grid()
+# Drift per step
+plt.figure(figsize=(10,5))
+plt.plot(drift_vals, linewidth=2)
+plt.xlabel('Step Index'); plt.ylabel('Drift (m)')
+plt.title('Drift per Step Interval')
+plt.grid(True)
 plt.show()
 
-# Enhanced ZUPT implementation with reduced effectiveness
-def enhanced_zupt(yaws, stationary_periods, gyro_data, smoothing_window=5):
-    corrected_yaws = yaws.copy()
-    for i in range(1, len(yaws)):
-        if stationary_periods[i]:
-            # Smooth the gyro data to estimate bias (reduced smoothing window)
-            if i >= smoothing_window:
-                heading_bias = np.mean(gyro_data[i-smoothing_window:i+smoothing_window, 2])
-            else:
-                heading_bias = np.mean(gyro_data[:i+smoothing_window, 2])
-            corrected_yaws[i:] -= heading_bias
-    return corrected_yaws
 
-gyro_data = np.vstack((wx_filtered, wy_filtered, wz_filtered)).T
-corrected_yaws = enhanced_zupt(yaws, stationary_periods_dynamic, gyro_data)
+#metrics
 
-# Trajectory estimation with intentional errors (scaled up)
-def estimate_trajectory(yaws, accel_magnitude, timestamps, stationary_periods):
-    trajectory = np.zeros((len(yaws), 2))  # X, Y positions
-    velocity = np.zeros(2)  # X, Y velocities
-    dt = np.diff(timestamps, prepend=timestamps[0])
+print("\n COMPREHENSIVE PERFORMANCE METRICS ")
 
-    for i in range(1, len(yaws)):
-        if stationary_periods[i]:
-            velocity = np.zeros(2)  # Reset velocity during stationary periods
-        else:
-            step_length = 0.5 * accel_magnitude[i]  # Dynamic step length estimation
-            # Add scaled-up random noise to velocity
-            velocity += np.array([np.cos(yaws[i]), np.sin(yaws[i])]) * step_length * dt[i] + np.random.normal(0, 0.5, size=2)
-        trajectory[i] = trajectory[i-1] + velocity * dt[i]
-    return trajectory
+print("\n Trajectory Accuracy ")
+print(f"RMSE:                 {traj_m['RMSE']:.3f} m")
+print(f"MAE:                  {traj_m['MAE']:.3f} m")
+print(f"Max Error:            {traj_m['MaxError']:.3f} m")
+print(f"Final Position Error: {traj_m['FinalError']:.3f} m")
+print(f"Average Error:        {traj_m['AvgError']:.3f} m")
+print(f"Median Error:         {traj_m['MedianError']:.3f} m")
 
-# Generate trajectory with intentional drift
-trajectory = estimate_trajectory(corrected_yaws, accel_magnitude, timestamps, stationary_periods_dynamic)
+print("\n Motion Detection ")
+print(f"Steps Detected:       {len(steps)}")
+print(f"Step Frequency:       {step_f:.2f} steps/s")
+print(f"Avg Step Interval:    {mean_int:.3f} ± {std_int:.3f} s")
+print(f"Stationary Samples:   {np.sum(stationary)}")
+print(f"ZUPT Effectiveness:   {zupt_eff[0]:.3f} m/s² (stationary) vs {zupt_eff[1]:.3f} m/s² (moving)")
 
-# Plot trajectories
-if len(trajectory) > 0 and len(true_positions) > 0:
-    min_length = min(len(trajectory), len(true_positions))
-    aligned_trajectory = trajectory[:min_length]
-    aligned_true_positions = true_positions[:min_length]
+head_m, head_s = heading_metrics(euler[:,2])
+print(f"Heading Stability (Mean Absolute Change): {head_m:.6f} radians")
 
-    plt.figure(figsize=(8, 6))
-    plt.plot(aligned_true_positions[:, 0], aligned_true_positions[:, 1], label="Ground Truth", color="green")
-    plt.plot(aligned_trajectory[:, 0], aligned_trajectory[:, 1], label="Estimated Trajectory", color="red", linestyle="--")
-    plt.xlabel("X Position (meters)")
-    plt.ylabel("Y Position (meters)")
-    plt.title("Trajectory vs Ground Truth")
-    plt.legend()
-    plt.grid()
-    plt.show()
 
-    # Compute drift
-    drift = np.linalg.norm(aligned_trajectory - aligned_true_positions, axis=1)
-    print("Drift at each step (meters):", drift)
+print("\n Noise Reduction ")
+axes = ['AX','AY','AZ','WX','WY','WZ']
+print(f"{'Axis':<4} {'RawVar':>8} {'FiltVar':>10} {'Red%':>8}")
+for ax, nm in zip(axes, noise_m):
+    print(f"{ax:<4} {nm[0]:8.6f} {nm[1]:10.6f} {nm[2]:8.1f}%")
 
-    plt.figure(figsize=(8, 6))
-    plt.plot(range(len(drift)), drift, label="Drift", color="blue")
-    plt.xlabel("Step Index")
-    plt.ylabel("Drift (meters)")
-    plt.title("Drift Over Steps")
-    plt.legend()
-    plt.grid()
-    plt.show()
+print("\n System Performance ")
+print(f"Total Samples:        {len(timestamps)}")
+print(f"Duration:             {duration:.2f} s")
+print(f"Processing Rate:      {len(timestamps)/duration:.2f} Hz")
+
+print("\n DRIFT ANALYSIS ")
+print("\nTotal Drift (Cumulative Error at Each Interval):")
+for i, d in enumerate(interval_drifts, start=1):
+    print(f"Interval {i}: {d:.3f} meters")
+
+print("\nDrift Change Between Intervals:")
+for i, change in enumerate(drift_changes, start=1):
+    print(f"Interval {i} → Interval {i+1}: {change:.3f} meters")

@@ -2,9 +2,20 @@ import numpy as np
 import scipy.signal as signal
 import matplotlib.pyplot as plt
 import pandas as pd
-import imufusion
+import imufusion 
 from scipy.signal import butter, filtfilt
-from calculate_rmse import calculate_rmse  # Import RMSE function
+
+# Route and ground truth options
+route_options = [
+    "route1.csv", "route2.csv", "route3.csv", "route4.csv",
+    "route4.1.csv", "route5.csv", "route5.1.csv",
+    "route6.csv", "route6.1.csv", "route7.csv", "route8.csv", "route9.csv"
+]
+
+ground_truth_options = [
+    "ground_truth1.csv", "ground_truth2.csv", "ground_truth3.csv",
+    "ground_truth4.csv", "ground_truth5.csv", "ground_truth6.csv", "ground_truth7.csv", "ground_truth8.csv", "ground_truth9.csv"
+]
 
 # Function to Get Valid User Input
 def get_valid_input(prompt, valid_range):
@@ -12,19 +23,25 @@ def get_valid_input(prompt, valid_range):
     while True:
         try:
             choice = int(input(prompt))
-            if choice in valid_range:
+            if 1 <= choice <= len(valid_range):
                 return choice
             else:
-                print(f"Invalid choice! Please enter a number between {valid_range[0]} and {valid_range[-1]}.")
+                print(f"Invalid choice! Please enter a number between 1 and {len(valid_range)}.")
         except ValueError:
             print("Invalid input! Please enter a valid number.")
 
 # User Input: Select Route & Ground Truth
-route_choice = get_valid_input("Select a route file (1/2/3): ", [1, 2, 3])
-filename = f"route{route_choice}.csv"
+print("Available route files:")
+for i, route in enumerate(route_options, 1):
+    print(f"{i}. {route}")
+route_choice = get_valid_input("Select a route file: ", range(1, len(route_options)+1))
+filename = route_options[route_choice-1]
 
-ground_truth_choice = get_valid_input("Select a ground truth file (1/2/3): ", [1, 2, 3])
-ground_truth_file = f"ground_truth{ground_truth_choice}.csv"
+print("\nAvailable ground truth files:")
+for i, truth in enumerate(ground_truth_options, 1):
+    print(f"{i}. {truth}")
+ground_truth_choice = get_valid_input("Select a ground truth file: ", range(1, len(ground_truth_options)+1))
+ground_truth_file = ground_truth_options[ground_truth_choice-1]
 
 required_columns = ['time', 'ax', 'ay', 'az', 'wz']
 
@@ -72,6 +89,11 @@ accel_magnitude = np.linalg.norm([x_axis_lowpass, y_axis_lowpass, z_axis_lowpass
 step_threshold = 0.2  # Threshold for detecting steps
 steps, _ = signal.find_peaks(accel_magnitude, height=step_threshold, distance=5)
 
+# Stationary detection (simple threshold-based)
+stationary = accel_magnitude < 0.1  # Adjust threshold as needed
+
+# VISUALIZATIONS 
+
 # Visualize Noise Filtering Effects
 plt.figure(figsize=(12, 10))
 
@@ -105,7 +127,7 @@ plt.xlabel("Time Steps")
 plt.ylabel("Acceleration")
 plt.grid(True)
 
-# Show the plots
+plt.tight_layout()
 plt.show()
 
 # Step Detection Plot
@@ -179,13 +201,81 @@ plt.xlabel("X Position (meters)")
 plt.ylabel("Y Position (meters)")
 plt.grid(True)
 plt.show()
-# Print Drift at Each Interval
+
+# PERFORMANCE METRICS 
+
+def calculate_rmse(estimated, ground_truth):
+    """Calculate Root Mean Square Error between two trajectories"""
+    return np.sqrt(np.mean(np.sum((estimated - ground_truth)**2, axis=1)))
+
+def calculate_mae(estimated, ground_truth):
+    """Calculate Mean Absolute Error between two trajectories"""
+    return np.mean(np.linalg.norm(estimated - ground_truth, axis=1))
+
+rmse = calculate_rmse(aligned_trajectory, aligned_truth)
+mae = calculate_mae(aligned_trajectory, aligned_truth)
+
+def evaluate_noise_reduction(raw_data, filtered_data):
+    raw_var = np.var(raw_data)
+    filtered_var = np.var(filtered_data)
+    reduction = 100 * (raw_var - filtered_var) / raw_var
+    return raw_var, filtered_var, reduction
+
+def heading_stability_metric(heading_data):
+    changes = np.abs(np.diff(heading_data))
+    return np.mean(changes)
+
+def evaluate_step_detection(steps, timestamps):
+    step_times = timestamps[steps]
+    intervals = np.diff(step_times)
+    step_freq = len(steps) / (timestamps[-1] - timestamps[0])
+    return step_freq, np.mean(intervals), np.std(intervals)
+
+heading_mac = heading_stability_metric(heading)
+step_freq, avg_interval, std_interval = evaluate_step_detection(steps, timestamps)
+duration_sec = timestamps[-1] - timestamps[0]
+
+print("\n=== PERFORMANCE METRICS ===")
+print(f"RMSE: {rmse:.3f} meters")
+print(f"MAE: {mae:.3f} meters")
+print(f"Max Drift: {np.max(drift):.3f} meters")
+print(f"Average Drift: {np.mean(drift):.3f} meters")
+print(f"Steps Detected: {len(steps)}")
+print(f"Stationary Periods: {np.sum(stationary)} samples")
+
+print("\n=== NOISE REDUCTION ===")
+for axis, raw, filt in zip(['AX', 'AY', 'AZ'], [x_axis, y_axis, z_axis], [x_axis_lowpass, y_axis_lowpass, z_axis_lowpass]):
+    var_red = 100 * (np.var(raw) - np.var(filt)) / np.var(raw)
+    print(f"{axis}: Variance Reduction = {var_red:.1f}%")
+
+print("\n--- Noise Filtering Evaluation (Variance Reduction) ---")
+print("\n[ Accelerometer Axes ]")
+for axis_name, raw, filtered in zip(['AX', 'AY', 'AZ'], [x_axis, y_axis, z_axis], [x_axis_lowpass, y_axis_lowpass, z_axis_lowpass]):
+    raw_var, filtered_var, reduction = evaluate_noise_reduction(raw, filtered)
+    print(f"{axis_name} - Raw Var: {raw_var:.6f}, Filtered Var: {filtered_var:.6f}, Reduction: {reduction:.2f}%")
+
+print("\n[ Gyroscope Axes ]")
+for axis_name, raw, filtered in zip(['WZ'], [z_gyro], [z_gyro_lowpass]):
+    raw_var, filtered_var, reduction = evaluate_noise_reduction(raw, filtered)
+    print(f"{axis_name} - Raw Var: {raw_var:.6f}, Filtered Var: {filtered_var:.6f}, Reduction: {reduction:.2f}%")
+
+print("\n Heading Evaluation ")
+print(f"Heading Stability (Mean Absolute Change): {heading_mac:.6f} radians")
+
+print("\n--- Step Detection Evaluation ---")
+print(f"Total Steps Detected: {len(steps)}")
+print(f"Step Frequency: {step_freq:.4f} steps/sec")
+print(f"Average Step Interval: {avg_interval:.4f} sec")
+print(f"Step Interval Std Dev: {std_interval:.4f} sec")
+print(f"Total IMU samples: {len(x_axis)}")
+print(f"Recording duration: {duration_sec:.2f} seconds")
+
 print("\nDrift at each interval (meters):")
 for i, d in enumerate(drift):
-    print(f"Interval {i+1}: {d:.3f} meters")  # Ensuring 3 decimal places
+    print(f"Interval {i+1}: {d:.3f} meters")
 
-# Compute RMSE and Display Clearly
-rmse = calculate_rmse("estimated_trajectory.csv", "ground_truth.csv")
-
-
-
+print("\nDrift Change Between Intervals:")
+drift_intervals = np.diff(drift)
+for i, d in enumerate(drift_intervals):
+    change_label = "Increase" if d > 0 else "Decrease"
+    print(f"Interval {i+1} → Interval {i+2}: {d:.3f} meters ({change_label})")
