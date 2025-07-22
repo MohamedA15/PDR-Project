@@ -16,7 +16,7 @@ This project explores how various filtering and correction techniques can reduce
 | **Model 2** | ZUPT-based correction using thresholded stationary detection. |
 | **Model 3** | Kalman Filtering for noise reduction on IMU signals. |
 | **Model 4** | Orientation estimation using Madgwick filter + ZUPT. |
-| **Model 5** | Final model with Mahony filter, Kalman filtering, ZUPT, dynamic step detection, and least-squares drift correction. |
+| **Model 5 (Main) ** | Final model with Mahony filter, Kalman filtering, ZUPT, dynamic step detection, and least-squares drift correction. |
 
 ## 📊 Evaluation Metrics
 - Root Mean Square Error (RMSE)
