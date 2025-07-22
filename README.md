@@ -13,8 +13,8 @@ This project explores how various filtering and correction techniques can reduce
 | Model | Description |
 |-------|-------------|
 | **Model 1** | Baseline PDR using raw acceleration and integration. |
-| **Model 2** | ZUPT-based correction using thresholded stationary detection. |
-| **Model 3** | Kalman Filtering for noise reduction on IMU signals. |
+| **Model 2** | IMFusion correction using thresholded stationary detection. |
+| **Model 3** | IMFusion with ZUPT for step detection on IMU signals. |
 | **Model 4** | Orientation estimation using Madgwick filter + ZUPT. |
 | **Model 5 (Main) ** | Final model with Mahony filter, Kalman filtering, ZUPT, dynamic step detection, and least-squares drift correction. |
 
